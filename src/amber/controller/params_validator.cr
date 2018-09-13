@@ -1,13 +1,4 @@
 class Hash(K, V)
-  # Fetch *key* or set it to *value*.
-  #
-  # ```
-  # h = {"foo" => "bar"}
-  # h.fetch_or_set("foo", "baz"); pp h
-  # # {"foo" => "bar"}
-  # h.fetch_or_set("bar", "baz"); pp h
-  # # {"foo" => "bar", "bar" => "baz"}
-  # ```
   def fetch_or_set(key, value)
     if has_key?(key)
       self.[key]
@@ -23,28 +14,14 @@ module ParamsValidator
   TIME_FORMAT_REGEX = /\d{4,}-\d{2,}-\d{2,}\s\d{2,}:\d{2,}:\d{2,}/
   DATETIME_FORMAT   = "%F %X%z"
 
-  # `Any` is a union of all types in `TYPES`
   {% begin %}
     alias Any = Union({{*TYPES}})
   {% end %}
 
-  # Gently check if the including type is valid.
-  def valid?
-    validate
-    errors.empty?
-  end
+  record Error, param : String, value : Any, message : String
 
-  # Roughly check if the including type is valid, raising `Error` otherwise.
-  def valid!
-    valid? || raise Error.new(errors)
-  end
-
-  getter errors = Hash(String, Array(String)).new
-
-  # Raised when the including type has validation errorss after calling `valid!`.
-  class Error < Exception
-    # A hash of invalid attributes, similar to `Validations#errors`.
-    getter errors : Hash(String, Array(String))
+  class ValidationError < Exception
+    getter errors : Array(Error)
 
     def initialize(@errors)
     end
@@ -53,21 +30,6 @@ module ParamsValidator
   macro included
     CONTENT_FIELDS = {} of Nil => Nil
     FIELD_OPTIONS = {} of Nil => Nil
-
-    def initialize(**args : Object)
-      set_attributes(args.to_h)
-    end
-
-    def initialize(args : Hash(Symbol | String, Any))
-      set_attributes(args)
-    end
-
-    def initialize(args : Amber::Router::Params)
-      set_attributes(args)
-    end
-
-    def initialize
-    end
 
     {% unless @type.has_method?("validate") %}
       # Run validations, clearing `#errors` before.
@@ -78,10 +40,6 @@ module ParamsValidator
     macro finished
       __process_params
     end
-  end
-
-  macro invalidate(attribute, message)
-    errors.fetch_or_set({{attribute}}, Array(String).new).push({{message}})
   end
 
   macro param(attribute, **options)
@@ -95,20 +53,28 @@ module ParamsValidator
   end
 
   private macro __process_params
-    def set_attributes(args : Hash(String | Symbol, Any))
-      args.each do |k, v|
-        cast(k, v.as(Any))
-      end
-    end
-
-    def set_attributes(args : Amber::Router::Params)
+    def initialize(@raw_params : Amber::Router::Params, key : String)
       {% for name, options in FIELD_OPTIONS %}
-        cast({{name.id.stringify}}, args[{{name.id.stringify}}].as(Any))
+        if !key.empty?
+         cast({{name.id.stringify}}, @raw_params["#{key}.{{name.id}}"].as(Any))
+        else
+         cast({{name.id.stringify}}, @raw_params[{{name.id.stringify}}].as(Any))
+        end
       {% end %}
     end
 
-    def set_attributes(**args)
-      set_attributes(args.to_h)
+    def valid?
+      errors.clear
+      validate
+      errors.empty?
+    end
+
+    def valid!
+      valid? || raise ValidationError.new(errors)
+    end
+
+    def error(attribute, value, message)
+      @errors << Error.new(attribute, value, message)
     end
 
     {% for name, options in FIELD_OPTIONS %}
@@ -171,42 +137,41 @@ module ParamsValidator
     end
 
     def validate
-      previous_def
       {% for name, options in FIELD_OPTIONS %}
         {% property_name = name.id %}
         unless {{property_name}}.nil?
           value = {{property_name}}.not_nil!
 
           {% if options[:is] %}
-            invalidate({{property_name.stringify}}, "must be equal to {{options[:is]}}") unless value == {{options[:is]}}
+            error({{property_name.stringify}}, value, "must be equal to {{options[:is]}}") unless value == {{options[:is]}}
           {% end %}
 
           {% if options[:gte] %}
-            invalidate({{property_name.stringify}}, "must be greater than or equal to {{options[:gte]}}") unless value >= {{options[:gte]}}
+            error({{property_name.stringify}}, value, "must be greater than or equal to {{options[:gte]}}") unless value >= {{options[:gte]}}
           {% end %}
 
           {% if options[:lte] %}
-            invalidate({{property_name.stringify}}, "must be less than or equal to {{options[:lte]}}") unless value <= {{options[:lte]}}
+            error({{property_name.stringify}}, value, "must be less than or equal to {{options[:lte]}}") unless value <= {{options[:lte]}}
           {% end %}
 
           {% if options[:gt] %}
-            invalidate({{property_name.stringify}}, "must be greater than {{options[:gt]}}") unless value > {{options[:gt]}}
+            error({{property_name.stringify}}, value, "must be greater than {{options[:gt]}}") unless value > {{options[:gt]}}
           {% end %}
 
           {% if options[:lt] %}
-            invalidate({{property_name.stringify}}, "must be less than {{options[:lt]}}") unless value < {{options[:lt]}}
+            error({{property_name.stringify}}, value, "must be less than {{options[:lt]}}") unless value < {{options[:lt]}}
           {% end %}
 
           {% if options[:in] %}
-            invalidate({{property_name.stringify}}, "must be in {{options[:in]}}") unless {{options[:in]}}.includes?(value)
+            error({{property_name.stringify}}, value, "must be in {{options[:in].join(", ").id}}") unless {{options[:in]}}.includes?(value)
           {% end %}
 
           {% if options[:size] %}
-            invalidate({{property_name.stringify}}, "must have size in {{options[:size]}}") unless {{options[:size]}}.includes?(value.size)
+            error({{property_name.stringify}}, value, "must have size in {{options[:size]}}") unless {{options[:size]}}.includes?(value.size)
           {% end %}
 
           {% if options[:regex] %}
-            invalidate({{property_name.stringify}}, "must match " + {{options[:regex].stringify}}) unless ({{options[:regex]}}).match(value)
+            error({{property_name.stringify}}, value, "must match " + {{options[:regex].stringify}}) unless ({{options[:regex]}}).match(value)
           {% end %}
         end
       {% end %}
